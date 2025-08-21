@@ -1,0 +1,65 @@
+app:
+  title: "UDP/TCP Studio (Auto-Roll)"
+  fps: 60
+  hide_timestamp_legend: true
+
+  drop_timestamp_channel: true
+
+data_sources:
+  - name: tcp0
+    type: tcp_client
+    host: "127.0.0.1"
+    port: 7000
+    format: float32_le_fixed
+    length: 22
+    # timestamp is last element (seconds)
+    timestamp_index: 21
+    timestamp_units: s
+    timestamp_zero: true
+
+  - name: udp0
+    type: udp
+    bind_ip: "0.0.0.0"
+    port: 5005
+    format: float32_le
+    length: 22
+    # no explicit timestamp; provide sample_rate_hz to synthesize time:
+    sample_rate_hz: 1000
+    timestamp_zero: true
+
+channels:
+  - range: "ch0..ch21"
+    width: 3
+
+plots:
+  - title: "TCP Demo"
+    source: tcp0
+    channels: ["ch0..ch5", "ch21"] # ch21 is timestamp; hidden in legend
+    window_samples: 100000
+    decimate: 1
+    grid: [true, true]
+    color_cycle:
+      ["#e63946", "#457b9d", "#2a9d8f", "#f4a261", "#1d7874", "#7a5c61", "#333"]
+    follow_x: true
+    x_axis: { mode: timestamp, window_s: 10, lock_right: true } # << try 3–6 s
+
+  - title: "UDP Demo"
+    source: udp0
+    channels: ["ch1..ch6"]
+    window_samples: 4000
+    decimate: 2
+    grid: [true, true]
+    color_cycle:
+      ["#8e44ad", "#2980b9", "#16a085", "#f39c12", "#d35400", "#2c3e50"]
+    follow_x: true
+    # no timestamp in vector; uses synthetic time from data_sources.sample_rate_hz
+    x_axis: { mode: time, window_s: 1000.0 }
+
+layout:
+  rows:
+    - ["TCP Demo"]
+    - ["UDP Demo"]
+
+control_groups: []
+controls: []
+senders: []

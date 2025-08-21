@@ -1,9 +1,5 @@
 # udp_studio_dock.py
-import os
-import sys
-import time
-import math
-import socket
+import os, sys, time, math, socket
 from dataclasses import dataclass
 from collections import deque, defaultdict
 from typing import Dict, List, Any, Callable, Tuple
@@ -15,11 +11,11 @@ from PyQt5.QtNetwork import QUdpSocket, QHostAddress
 import pyqtgraph as pg
 from pyqtgraph.dockarea import DockArea, Dock
 
+from PyQt5 import QtGui
+
 pg.setConfigOptions(useOpenGL=True, antialias=True)  # anti-aliasing hurts perf
 
-
-# ------------------ Tiny helpers (NO regex) ------------------
-
+# ---------- helpers (no regex) ----------
 def _split_prefix_num(s: str) -> Tuple[str, int]:
     s = str(s).strip()
     i = len(s)
@@ -29,7 +25,6 @@ def _split_prefix_num(s: str) -> Tuple[str, int]:
     if i == len(s):
         raise ValueError(f"Missing numeric suffix in '{s}'")
     return prefix, int(s[i:])
-
 
 def expand_range_token(token: str) -> List[str]:
     token = str(token).strip()
@@ -48,13 +43,11 @@ def expand_range_token(token: str) -> List[str]:
     step = 1 if rn >= ln else -1
     return [f"{prefix}{i}" for i in range(ln, rn + step, step)]
 
-
 def expand_list(tokens: List[str]) -> List[str]:
     out = []
     for t in tokens:
         out.extend(expand_range_token(t))
     return out
-
 
 def parse_floats(payload: bytes, prefer_binary=True):
     if prefer_binary and len(payload) % 4 == 0 and len(payload) > 0:
@@ -72,8 +65,7 @@ def parse_floats(payload: bytes, prefer_binary=True):
         return None
 
 
-# ------------------ Config model ------------------
-
+# ---------- config ----------
 @dataclass
 class ChannelSpec:
     name: str
@@ -84,12 +76,10 @@ class ChannelSpec:
     color: Any = None
     width: float = 1.5
 
-
 class Config:
     def __init__(self, path="config.yaml"):
         self.path = path
         self.reload()
-
     def reload(self):
         with open(self.path, "r", encoding="utf-8") as f:
             cfg = yaml.safe_load(f) or {}
@@ -105,11 +95,9 @@ class Config:
         self.logging = cfg.get("logging", {"enabled": False})
 
 
-# ------------------ UDP / TCP sources ------------------
-
+# ---------- inputs ----------
 class UdpSource(QtCore.QObject):
     vector = QtCore.pyqtSignal(np.ndarray)
-
     def __init__(self, spec: dict, parent=None):
         super().__init__(parent)
         self.spec = spec
@@ -120,7 +108,6 @@ class UdpSource(QtCore.QObject):
         if not self.sock.bind(addr, port):
             raise RuntimeError(f"Could not bind UDP {ip}:{port}")
         self.sock.readyRead.connect(self._on_ready)
-
     @QtCore.pyqtSlot()
     def _on_ready(self):
         fmt = self.spec.get("format", "float32_le")
@@ -132,212 +119,138 @@ class UdpSource(QtCore.QObject):
             if vec is not None:
                 self.vector.emit(vec)
 
-
 class TcpClientSource(QtCore.QObject):
     vector = QtCore.pyqtSignal(np.ndarray)
-
     def __init__(self, spec: dict, parent=None):
         super().__init__(parent)
         from PyQt5.QtNetwork import QTcpSocket
         self.spec = spec
         self.socket = QTcpSocket(self)
-
-        self.host   = spec.get("host", "127.0.0.1")
-        self.port   = int(spec.get("port", 7000))
-        self.format = spec.get("format", "float32_le_fixed")
+        self.host = spec.get("host", "127.0.0.1")
+        self.port = int(spec.get("port", 7000))
+        self.format = spec.get("format", "float32_le_fixed")  # or ascii_line
         self.length = int(spec.get("length", 0))
-        self.delim  = spec.get("line_delimiter", "\n").encode("utf-8")
+        self.delim = spec.get("line_delimiter", "\n").encode("utf-8")
         self._buf = bytearray()
-
-        self._recon = QtCore.QTimer(self)
-        self._recon.setSingleShot(True)
+        self._recon = QtCore.QTimer(self); self._recon.setSingleShot(True)
         self._recon.timeout.connect(self._connect)
-
         self.socket.readyRead.connect(self._on_ready)
         try:
             self.socket.errorOccurred.connect(lambda *_: self._schedule_reconnect())
         except Exception:
-            try:
-                self.socket.error.connect(lambda *_: self._schedule_reconnect())
-            except Exception:
-                pass
+            try: self.socket.error.connect(lambda *_: self._schedule_reconnect())
+            except Exception: pass
         self.socket.disconnected.connect(self._schedule_reconnect)
-
         self._connect()
-
     def _connect(self):
-        self._buf.clear()
-        self.socket.abort()
-        self.socket.connectToHost(self.host, self.port)
-
+        self._buf.clear(); self.socket.abort(); self.socket.connectToHost(self.host, self.port)
     def _schedule_reconnect(self):
-        if not self._recon.isActive():
-            self._recon.start(500)
-
+        if not self._recon.isActive(): self._recon.start(500)
     @QtCore.pyqtSlot()
     def _on_ready(self):
         data = bytes(self.socket.readAll())
-        if not data:
-            return
+        if not data: return
         self._buf += data
-
         if self.format == "float32_le_fixed":
-            if self.length <= 0:
-                return
+            if self.length <= 0: return
             frame_bytes = self.length * 4
             while len(self._buf) >= frame_bytes:
-                chunk = self._buf[:frame_bytes]
-                del self._buf[:frame_bytes]
+                chunk = self._buf[:frame_bytes]; del self._buf[:frame_bytes]
                 vec = np.frombuffer(chunk, dtype="<f4").copy()
                 self.vector.emit(vec)
-
         elif self.format == "ascii_line":
             while True:
                 idx = self._buf.find(self.delim)
-                if idx < 0:
-                    break
-                line = self._buf[:idx]
-                del self._buf[:idx + len(self.delim)]
+                if idx < 0: break
+                line = self._buf[:idx]; del self._buf[:idx + len(self.delim)]
                 s = line.decode("utf-8", "ignore").strip()
-                if not s:
-                    continue
+                if not s: continue
                 parts = [p for p in s.replace(",", " ").split() if p]
-                try:
-                    vec = np.array([float(p) for p in parts], dtype=np.float32)
-                    self.vector.emit(vec)
-                except Exception:
-                    pass
-
+                try: self.vector.emit(np.array([float(p) for p in parts], dtype=np.float32))
+                except Exception: pass
 
 class TcpServerSource(QtCore.QObject):
     vector = QtCore.pyqtSignal(np.ndarray)
-
     def __init__(self, spec: dict, parent=None):
         super().__init__(parent)
         from PyQt5.QtNetwork import QTcpServer
         self.spec = spec
         self.server = QTcpServer(self)
-
-        ip   = spec.get("bind_ip", "0.0.0.0")
+        ip = spec.get("bind_ip", "0.0.0.0")
         port = int(spec.get("port", 7000))
         addr = QHostAddress.AnyIPv4 if ip in ("0.0.0.0", "", None) else QHostAddress(ip)
         if not self.server.listen(addr, port):
             raise RuntimeError(f"Could not bind TCP {ip}:{port}")
-
         self.format = spec.get("format", "float32_le_fixed")
         self.length = int(spec.get("length", 0))
-        self.delim  = spec.get("line_delimiter", "\n").encode("utf-8")
-
-        self.client = None
-        self._buf = bytearray()
-
+        self.delim = spec.get("line_delimiter", "\n").encode("utf-8")
+        self.client = None; self._buf = bytearray()
         self.server.newConnection.connect(self._accept)
-
     def _accept(self):
         sock = self.server.nextPendingConnection()
         if self.client:
-            try:
-                self.client.readyRead.disconnect()
-                self.client.disconnected.disconnect()
-            except Exception:
-                pass
+            try: self.client.readyRead.disconnect(); self.client.disconnected.disconnect()
+            except Exception: pass
             self.client.close()
         self.client = sock
         self.client.readyRead.connect(self._on_ready)
         self.client.disconnected.connect(self._on_disc)
         self._buf.clear()
-
-    def _on_disc(self):
-        self.client = None
-        self._buf.clear()
-
+    def _on_disc(self): self.client = None; self._buf.clear()
     @QtCore.pyqtSlot()
     def _on_ready(self):
-        if not self.client:
-            return
+        if not self.client: return
         data = bytes(self.client.readAll())
-        if not data:
-            return
+        if not data: return
         self._buf += data
-
         if self.format == "float32_le_fixed":
-            if self.length <= 0:
-                return
+            if self.length <= 0: return
             frame_bytes = self.length * 4
             while len(self._buf) >= frame_bytes:
-                chunk = self._buf[:frame_bytes]
-                del self._buf[:frame_bytes]
+                chunk = self._buf[:frame_bytes]; del self._buf[:frame_bytes]
                 vec = np.frombuffer(chunk, dtype="<f4").copy()
                 self.vector.emit(vec)
-
         elif self.format == "ascii_line":
             while True:
                 idx = self._buf.find(self.delim)
-                if idx < 0:
-                    break
-                line = self._buf[:idx]
-                del self._buf[:idx + len(self.delim)]
+                if idx < 0: break
+                line = self._buf[:idx]; del self._buf[:idx + len(self.delim)]
                 s = line.decode("utf-8", "ignore").strip()
-                if not s:
-                    continue
+                if not s: continue
                 parts = [p for p in s.replace(",", " ").split() if p]
-                try:
-                    vec = np.array([float(p) for p in parts], dtype=np.float32)
-                    self.vector.emit(vec)
-                except Exception:
-                    pass
+                try: self.vector.emit(np.array([float(p) for p in parts], dtype=np.float32))
+                except Exception: pass
 
 
-# ------------------ Sender ------------------
-
+# ---------- sender ----------
 class UdpSender(QtCore.QObject):
     tx_rate = QtCore.pyqtSignal(float)
-
     def __init__(self, spec: dict, value_getter: Callable[[str], float], parent=None):
         super().__init__(parent)
-        self.spec = spec
-        self.get = value_getter
-        self.timer = QtCore.QTimer(self)
-        self.timer.timeout.connect(self._tick)
+        self.spec = spec; self.get = value_getter
+        self.timer = QtCore.QTimer(self); self.timer.timeout.connect(self._tick)
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.addr = (spec["remote_ip"], int(spec["remote_port"]))
         self.format = spec.get("format", "float32_le")
         self.template = spec.get("vector", {}).get("template", [])
-        self._t_last = time.time()
-        self._sent = 0
-
+        self._t_last = time.time(); self._sent = 0
     def start(self):
         hz = float(self.spec.get("rate_hz", 100.0))
-        self.timer.start(max(1, int(1000.0 / hz)))
-        self._t_last = time.time()
-        self._sent = 0
-
-    def stop(self):
-        self.timer.stop()
-
-    def send_once(self):
-        self._send()
-
+        self.timer.start(max(1, int(1000.0 / hz))); self._t_last = time.time(); self._sent = 0
+    def stop(self): self.timer.stop()
+    def send_once(self): self._send()
     def _tick(self):
-        self._send()
-        self._sent += 1
+        self._send(); self._sent += 1
         now = time.time()
         if now - self._t_last >= 0.5:
             self.tx_rate.emit(self._sent / (now - self._t_last))
-            self._sent = 0
-            self._t_last = now
-
+            self._sent = 0; self._t_last = now
     def _resolve_item(self, item):
-        if isinstance(item, (int, float)):
-            return float(item)
+        if isinstance(item, (int, float)): return float(item)
         if isinstance(item, str) and item.startswith("$"):
-            v = self.get(item[1:])
-            return float(v) if v is not None else 0.0
-        try:
-            return float(item)
-        except Exception:
-            return 0.0
-
+            v = self.get(item[1:]); return float(v) if v is not None else 0.0
+        try: return float(item)
+        except Exception: return 0.0
     def _send(self):
         vec = [self._resolve_item(x) for x in self.template]
         try:
@@ -346,12 +259,10 @@ class UdpSender(QtCore.QObject):
             else:
                 payload = (" ".join(f"{x:.6g}" for x in vec)).encode("utf-8")
             self.sock.sendto(payload, self.addr)
-        except Exception:
-            pass
+        except Exception: pass
 
 
-# ------------------ Main app ------------------
-
+# ---------- app ----------
 class Studio(QtWidgets.QMainWindow):
     def __init__(self, cfg_path="config.yaml"):
         super().__init__()
@@ -359,32 +270,54 @@ class Studio(QtWidgets.QMainWindow):
         self.setWindowTitle(self.cfg.app.get("title", "UDP/TCP Studio"))
         self.resize(1500, 900)
         pg.setConfigOptions(antialias=True)
+        # Apply theme before building widgets
+        self._apply_theme_from_cfg()
 
-        central = QtWidgets.QWidget()
-        self.setCentralWidget(central)
+
+        central = QtWidgets.QWidget(); self.setCentralWidget(central)
         h = QtWidgets.QHBoxLayout(central)
 
-        self.dock_area = DockArea()
-        h.addWidget(self.dock_area, 1)
+        self.dock_area = DockArea(); h.addWidget(self.dock_area, 1)
 
-        self.side = QtWidgets.QScrollArea()
-        self.side.setWidgetResizable(True)
-        self.side_in = QtWidgets.QWidget()
-        self.side.setWidget(self.side_in)
-        self.vside = QtWidgets.QVBoxLayout(self.side_in)
-        h.addWidget(self.side, 0)
+        self.side = QtWidgets.QScrollArea(); self.side.setWidgetResizable(True)
+        self.side_in = QtWidgets.QWidget(); self.side.setWidget(self.side_in)
+        self.vside = QtWidgets.QVBoxLayout(self.side_in); h.addWidget(self.side, 0)
 
         self.status = self.statusBar()
         self.rx_rate_lbl = QtWidgets.QLabel("RX: 0 pps")
         self.last_len_lbl = QtWidgets.QLabel("Vec: -")
         self.status.addPermanentWidget(self.rx_rate_lbl)
         self.status.addPermanentWidget(self.last_len_lbl)
+        
+        # View → Theme menu
+        m_view = self.menuBar().addMenu("View")
+        m_theme = m_view.addMenu("Theme")
 
-        # State
+        def set_theme(name, pg_bg, pg_fg):
+            # Update cfg in-memory and apply
+            self.cfg.app.setdefault("theme", {})
+            self.cfg.app["theme"]["name"] = name
+            self.cfg.app["theme"]["pg_background"] = pg_bg
+            self.cfg.app["theme"]["pg_foreground"] = pg_fg
+            self._apply_theme(self.cfg.app["theme"])
+
+        # Presets
+        act1 = m_theme.addAction("Light UI + Dark Plots")
+        act1.triggered.connect(lambda: set_theme("fusion-light", "#0f0f12", "#e6e6e6"))
+
+        act2 = m_theme.addAction("Dark UI + Dark Plots")
+        act2.triggered.connect(lambda: set_theme("fusion-dark", "#0f0f12", "#e6e6e6"))
+
+        act3 = m_theme.addAction("Light UI + Light Plots")
+        act3.triggered.connect(lambda: set_theme("fusion-light", "#ffffff", "#222222"))
+
+
+        # state
         self.sources: Dict[str, Any] = {}
         self.channel_specs: Dict[str, ChannelSpec] = {}
         self.buffers_by_source: Dict[str, Dict[str, deque]] = {}
         self.curves: Dict[tuple, pg.PlotDataItem] = {}
+        self.curve_data: Dict[tuple, Tuple[np.ndarray, np.ndarray]] = {}
         self.panels: Dict[str, pg.PlotWidget] = {}
         self.docks: Dict[str, Dock] = {}
         self.window_samples: Dict[str, int] = {}
@@ -392,16 +325,28 @@ class Studio(QtWidgets.QMainWindow):
         self.plot_x_mode: Dict[str, str] = {}
         self.plot_fs: Dict[str, float] = {}
         self.plot_color_cycle: Dict[str, List[Any]] = {}
-        self.timebufs: Dict[str, deque] = {}   # seconds
-        self.ds_ts_cfg: Dict[str, dict] = {}   # {index, scale, zero, t0, fs, cnt}
+        self.timebufs: Dict[str, deque] = {}      # seconds
+        self.ds_ts_cfg: Dict[str, dict] = {}      # {index, scale, zero, t0, fs, cnt}
         self.plot_source: Dict[str, str] = {}
-        # Per-plot UX
+        # UX
         self.plot_paused: Dict[str, bool] = {}
         self.follow_x: Dict[str, bool] = {}
         self.y_locked: Dict[str, bool] = {}
         self.locked_range: Dict[str, Tuple[float, float]] = {}
+        # crosshair + inspector
+        self.crosshair_enabled: Dict[str, bool] = {}
+        self.crosshair_items: Dict[str, dict] = {}  # title -> {v,h,proxy}
+        self.readout_tables: Dict[str, QtWidgets.QTableWidget] = {}
+        self.readout_rows: Dict[tuple, int] = {}
+        self.readout_x_label: Dict[str, QtWidgets.QLabel] = {}
+        self.readout_pinned: Dict[str, bool] = {}
+        self.crosshair_max_channels = int(self.cfg.app.get("crosshair_max_channels", 8))
+        self.inspector_visible: Dict[str, bool] = {}
+        self.inspector_widgets: Dict[str, QtWidgets.QWidget] = {}
+        # links
+        self.x_link_groups: Dict[str, List[str]] = {}
 
-        # Controls & senders
+        # controls/senders
         self.control_meta: Dict[str, dict] = {}
         self.staged: Dict[str, float] = {}
         self.active: Dict[str, float] = {}
@@ -409,14 +354,10 @@ class Studio(QtWidgets.QMainWindow):
         self._button_timers: Dict[str, QtCore.QTimer] = {}
         self.senders: Dict[str, UdpSender] = {}
 
-        # RX meter
-        self._rx_count = 0
-        self._rx_t0 = time.time()
-        self._rx_meter = QtCore.QTimer(self)
-        self._rx_meter.timeout.connect(self._update_rx_rate)
-        self._rx_meter.start(500)
+        # meters
+        self._rx_count = 0; self._rx_t0 = time.time()
+        self._rx_meter = QtCore.QTimer(self); self._rx_meter.timeout.connect(self._update_rx_rate); self._rx_meter.start(500)
 
-        # Build UI
         self._build_everything()
 
         fps = int(self.cfg.app.get("fps", 60))
@@ -429,58 +370,40 @@ class Studio(QtWidgets.QMainWindow):
         self.reload_timer.timeout.connect(self._hot_reload)
         self.reload_timer.start(500)
 
-    # ---------- build / rebuild ----------
+    # ----- build/rebuild -----
     def _file_mtime(self):
-        try:
-            return os.path.getmtime(self.cfg.path)
-        except Exception:
-            return 0
+        try: return os.path.getmtime(self.cfg.path)
+        except Exception: return 0
 
     def _hot_reload(self):
         m = self._file_mtime()
         if m != self._mtime:
             self._mtime = m
-            try:
-                self.cfg.reload()
-                self._rebuild_from_cfg()
-                self.status.showMessage("Config reloaded.", 1500)
-            except Exception as e:
-                self.status.showMessage(f"Reload failed: {e}", 3000)
+            try: self.cfg.reload(); self._rebuild_from_cfg(); self.status.showMessage("Config reloaded.", 1500)
+            except Exception as e: self.status.showMessage(f"Reload failed: {e}", 3000)
 
     def _rebuild_from_cfg(self):
-        for _, dock in list(self.docks.items()):
-            self.dock_area.removeDock(dock)
+        for _, dock in list(self.docks.items()): self.dock_area.removeDock(dock)
         self.docks.clear()
         while self.vside.count():
             item = self.vside.takeAt(0)
             w = item.widget()
-            if w:
-                w.setParent(None)
+            if w: w.setParent(None)
 
-        self.sources.clear()
-        self.channel_specs.clear()
-        self.buffers_by_source.clear()
-        self.curves.clear()
-        self.panels.clear()
-        self.window_samples.clear()
-        self.decimate.clear()
-        self.plot_x_mode.clear()
-        self.plot_fs.clear()
-        self.plot_color_cycle.clear()
-        self.timebufs.clear()
-        self.ds_ts_cfg.clear()
-        self.plot_source.clear()
-        self.plot_paused.clear()
-        self.follow_x.clear()
-        self.y_locked.clear()
-        self.locked_range.clear()
-        self.control_meta.clear()
-        self._group_to_controls.clear()
-        self.staged.clear()
-        self.active.clear()
-        self._button_timers.clear()
-        for sd in list(self.senders.values()):
-            sd.stop()
+        # clear state
+        self.sources.clear(); self.channel_specs.clear(); self.buffers_by_source.clear()
+        self.curves.clear(); self.curve_data.clear(); self.panels.clear(); self.docks.clear()
+        self.window_samples.clear(); self.decimate.clear(); self.plot_x_mode.clear()
+        self.plot_fs.clear(); self.plot_color_cycle.clear(); self.timebufs.clear()
+        self.ds_ts_cfg.clear(); self.plot_source.clear(); self.plot_paused.clear()
+        self.follow_x.clear(); self.y_locked.clear(); self.locked_range.clear()
+        self.crosshair_enabled.clear(); self.crosshair_items.clear()
+        self.readout_tables.clear(); self.readout_rows.clear(); self.readout_x_label.clear(); self.readout_pinned.clear()
+        self.inspector_visible.clear(); self.inspector_widgets.clear()
+        self.x_link_groups.clear()
+        self.control_meta.clear(); self._group_to_controls.clear(); self.staged.clear()
+        self.active.clear(); self._button_timers.clear()
+        for sd in list(self.senders.values()): sd.stop()
         self.senders.clear()
 
         self._build_everything()
@@ -490,21 +413,16 @@ class Studio(QtWidgets.QMainWindow):
         return max(win_sizes) * 2 if win_sizes else 10000
 
     def _build_everything(self):
-        # 1) Sources
+        # 1) sources
         for ds in self.cfg.data_sources:
             t = ds.get("type")
-            if t == "udp":
-                src = UdpSource(ds, self)
-            elif t == "tcp_client":
-                src = TcpClientSource(ds, self)
-            elif t == "tcp_server":
-                src = TcpServerSource(ds, self)
-            else:
-                continue
+            if t == "udp": src = UdpSource(ds, self)
+            elif t == "tcp_client": src = TcpClientSource(ds, self)
+            elif t == "tcp_server": src = TcpServerSource(ds, self)
+            else: continue
             src.vector.connect(self._rx_handler(ds))
             self.sources[ds["name"]] = src
 
-            # Timestamp config (and synthetic clock support)
             idx = ds.get("timestamp_index", None)
             scale = ds.get("timestamp_scale", None)
             if scale is None:
@@ -517,20 +435,22 @@ class Studio(QtWidgets.QMainWindow):
             self.timebufs[ds["name"]] = deque(maxlen=10000)
             self.buffers_by_source[ds["name"]] = {}
 
-        # 2) Channels
+        # 2) channels
         self._build_channels_from_cfg()
 
-        # 3) Controls & layout tools
-        self._build_controls_from_cfg()
-        self._build_layout_controls()
+        # 3) controls/layout tools
+        self._build_controls_from_cfg(); self._build_layout_controls()
 
-        # 4) Senders
+        # 4) senders
         self._build_senders_from_cfg()
 
-        # 5) Plots
+        # 5) plots/docks/curves
         self._build_plots_and_docks()
 
-        # Resize time buffers based on windows
+        # 6) link groups after plots are created
+        self._apply_x_links()
+
+        # resize time buffers
         tlen = self._timebuf_len()
         for k in list(self.timebufs.keys()):
             self.timebufs[k] = deque(self.timebufs[k], maxlen=tlen)
@@ -544,35 +464,25 @@ class Studio(QtWidgets.QMainWindow):
                 for name in expand_range_token(c["range"]):
                     _, idx = _split_prefix_num(name)
                     self.channel_specs[name] = ChannelSpec(
-                        name=name,
-                        index=idx,
-                        unit=c.get("unit", ""),
-                        scale=float(c.get("scale", 1.0)),
-                        offset=float(c.get("offset", 0.0)),
-                        color=c.get("color", None),
-                        width=float(c.get("width", 1.5)),
+                        name=name, index=idx, unit=c.get("unit", ""), scale=float(c.get("scale", 1.0)),
+                        offset=float(c.get("offset", 0.0)), color=c.get("color", None), width=float(c.get("width", 1.5))
                     )
             elif isinstance(c, dict) and "name" in c and "index" in c:
                 self.channel_specs[c["name"]] = ChannelSpec(
-                    name=c["name"],
-                    index=int(c["index"]),
-                    unit=c.get("unit", ""),
-                    scale=float(c.get("scale", 1.0)),
-                    offset=float(c.get("offset", 0.0)),
-                    color=c.get("color", None),
-                    width=float(c.get("width", 1.5)),
+                    name=c["name"], index=int(c["index"]), unit=c.get("unit", ""), scale=float(c.get("scale", 1.0)),
+                    offset=float(c.get("offset", 0.0)), color=c.get("color", None), width=float(c.get("width", 1.5))
                 )
             elif isinstance(c, str):
                 for name in expand_range_token(c):
                     _, idx = _split_prefix_num(name)
                     self.channel_specs[name] = ChannelSpec(name=name, index=idx)
 
-        # Ensure per-source buffers exist for all channels
+        # ensure per-source buffers
         for src_name, bufmap in self.buffers_by_source.items():
-            for ch_name in self.channel_specs.keys():
-                bufmap.setdefault(ch_name, deque(maxlen=5000))
+            for ch in self.channel_specs.keys():
+                bufmap.setdefault(ch, deque(maxlen=5000))
 
-        # Fallback autogen
+        # fallback autogen
         if not self.channel_specs:
             length = 0
             for ds in (self.cfg.data_sources or []):
@@ -590,35 +500,24 @@ class Studio(QtWidgets.QMainWindow):
         group_boxes: Dict[str, QtWidgets.QGroupBox] = {}
 
         def ensure_group_box(gname: str):
-            if gname in group_boxes:
-                return group_boxes[gname]
+            if gname in group_boxes: return group_boxes[gname]
             box = QtWidgets.QGroupBox(group_meta.get(gname, {}).get("title", gname))
-            v = QtWidgets.QVBoxLayout(box)
-            form = QtWidgets.QFormLayout()
-            v.addLayout(form)
+            v = QtWidgets.QVBoxLayout(box); form = QtWidgets.QFormLayout(); v.addLayout(form)
             box._form = form  # type: ignore
-            group_boxes[gname] = box
-            self.vside.addWidget(box)
-            return box
+            group_boxes[gname] = box; self.vside.addWidget(box); return box
 
         for ctl in self.cfg.controls or []:
-            cid = ctl["id"]
-            grp = ctl.get("group", "default")
-            self.control_meta[cid] = ctl
-            self._group_to_controls[grp].append(cid)
+            cid = ctl["id"]; grp = ctl.get("group", "default")
+            self.control_meta[cid] = ctl; self._group_to_controls[grp].append(cid)
             default = ctl.get("default", 0.0 if ctl.get("type") != "bool" else False)
             self.staged[cid] = 1.0 if isinstance(default, bool) and default else (float(default) if not isinstance(default, bool) else 0.0)
             self.active[cid] = self.staged[cid]
 
         for gname in groups_in_order + [g for g in self._group_to_controls if g not in groups_in_order]:
-            box = ensure_group_box(gname)
-            form = box._form
+            box = ensure_group_box(gname); form = box._form
             for cid in self._group_to_controls.get(gname, []):
-                meta = self.control_meta[cid]
-                typ = meta.get("type", "float")
-                label = meta.get("label", cid)
-                apply_required = bool(meta.get("apply_required", True))
-
+                meta = self.control_meta[cid]; typ = meta.get("type", "float")
+                label = meta.get("label", cid); apply_required = bool(meta.get("apply_required", True))
                 if typ == "float":
                     minv = float(meta.get("min", 0.0)); maxv = float(meta.get("max", 100.0))
                     step = float(meta.get("step", 0.1)); steps = int(meta.get("slider_steps", 1000))
@@ -627,43 +526,33 @@ class Studio(QtWidgets.QMainWindow):
                     decimals = min(6, max(0, int(-math.log10(step))) if step < 1 else 3); spin.setDecimals(decimals)
                     spin.setValue(self.staged[cid])
                     slider = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal); slider.setMinimum(0); slider.setMaximum(steps)
-
                     def to_pos(val): return int(round((float(val)-minv)/(maxv-minv)*steps)) if maxv>minv else 0
-                    def to_val(pos): return minv + (maxv - minv) * (pos/steps) if steps>0 else minv
-
+                    def to_val(pos): return minv + (maxv-minv)*(pos/steps) if steps>0 else minv
                     slider.setValue(to_pos(self.staged[cid]))
-
                     def on_spin(v, _cid=cid, _apply=apply_required):
-                        self.staged[_cid] = float(v)
+                        self.staged[_cid] = float(v); 
                         if not _apply: self.active[_cid] = float(v)
                         slider.blockSignals(True); slider.setValue(to_pos(v)); slider.blockSignals(False)
                     def on_slider(pos, _cid=cid, _apply=apply_required):
                         val = float(to_val(pos)); self.staged[_cid] = val
                         if not _apply: self.active[_cid] = val
                         spin.blockSignals(True); spin.setValue(val); spin.blockSignals(False)
-
                     spin.valueChanged.connect(on_spin); slider.valueChanged.connect(on_slider)
-                    h.addWidget(slider, 2); h.addWidget(spin, 1)
-                    form.addRow(label, container)
-
+                    h.addWidget(slider, 2); h.addWidget(spin, 1); form.addRow(label, container)
                 elif typ == "bool":
                     chk = QtWidgets.QCheckBox(); chk.setChecked(bool(self.staged[cid] >= 0.5))
                     def on_chk(state, _cid=cid, _apply=apply_required):
                         self.staged[_cid] = 1.0 if state else 0.0
                         if not _apply: self.active[_cid] = self.staged[_cid]
-                    chk.stateChanged.connect(on_chk)
-                    form.addRow(label, chk)
-
+                    chk.stateChanged.connect(on_chk); form.addRow(label, chk)
                 elif typ == "button":
-                    pulse_ms = int(meta.get("pulse_ms", 50))
-                    btn = QtWidgets.QPushButton(label)
+                    pulse_ms = int(meta.get("pulse_ms", 50)); btn = QtWidgets.QPushButton(label)
                     def on_btn(_cid=cid, _ms=pulse_ms):
                         self.active[_cid] = 1.0
                         if _cid in self._button_timers: self._button_timers[_cid].stop()
                         t = QtCore.QTimer(self); t.setSingleShot(True); t.timeout.connect(lambda: self._reset_button(_cid)); t.start(_ms)
                         self._button_timers[_cid] = t
-                    btn.clicked.connect(on_btn)
-                    form.addRow(btn)
+                    btn.clicked.connect(on_btn); form.addRow(btn)
 
             apply_label = group_meta.get(gname, {}).get("apply_label", None)
             if apply_label:
@@ -674,138 +563,134 @@ class Studio(QtWidgets.QMainWindow):
                         if meta.get("type") == "button": continue
                         if bool(meta.get("apply_required", True)): self.active[cid] = self.staged[cid]
                     self.status.showMessage(f"Applied group '{_g}'", 1200)
-                abtn.clicked.connect(do_apply)
-                form.addRow("", abtn)
-
+                abtn.clicked.connect(do_apply); form.addRow("", abtn)
         self.vside.addStretch()
 
     def _build_layout_controls(self):
-        box = QtWidgets.QGroupBox("Layout")
-        h = QtWidgets.QHBoxLayout(box)
-        btn_save = QtWidgets.QPushButton("Save Layout")
-        btn_load = QtWidgets.QPushButton("Load Layout")
-        h.addWidget(btn_save); h.addWidget(btn_load)
-        self.vside.addWidget(box)
-
+        box = QtWidgets.QGroupBox("Layout"); h = QtWidgets.QHBoxLayout(box)
+        btn_save = QtWidgets.QPushButton("Save Layout"); btn_load = QtWidgets.QPushButton("Load Layout")
+        h.addWidget(btn_save); h.addWidget(btn_load); self.vside.addWidget(box)
         state_path = os.path.join(os.path.dirname(self.cfg.path), "dock_layout.state")
         def save_state():
-            st = self.dock_area.saveState()
-            with open(state_path, "wb") as f: f.write(bytes(st))
+            st = self.dock_area.saveState(); open(state_path, "wb").write(bytes(st))
             self.status.showMessage(f"Layout saved to {state_path}", 1500)
         def load_state():
             try:
-                with open(state_path, "rb") as f: data = f.read()
-                self.dock_area.restoreState(data)
-                self.status.showMessage("Layout restored.", 1500)
+                data = open(state_path, "rb").read()
+                self.dock_area.restoreState(data); self.status.showMessage("Layout restored.", 1500)
             except Exception as e:
                 self.status.showMessage(f"Load failed: {e}", 2500)
         btn_save.clicked.connect(save_state); btn_load.clicked.connect(load_state)
 
     def _build_senders_from_cfg(self):
-        if not self.cfg.senders:
-            return
+        if not self.cfg.senders: return
         box = QtWidgets.QGroupBox("Senders"); v = QtWidgets.QVBoxLayout(box)
         for sd in self.cfg.senders:
             if sd.get("type") != "udp": continue
             row = QtWidgets.QGroupBox(sd.get("name", "tx")); form = QtWidgets.QFormLayout(row)
             form.addRow("Remote:", QtWidgets.QLabel(f"{sd['remote_ip']}:{sd['remote_port']}"))
-            form.addRow("Rate:",   QtWidgets.QLabel(f"{sd.get('rate_hz', 100.0)} Hz"))
+            form.addRow("Rate:", QtWidgets.QLabel(f"{sd.get('rate_hz', 100.0)} Hz"))
             form.addRow("Format:", QtWidgets.QLabel(sd.get("format", "float32_le")))
-            hb = QtWidgets.QHBoxLayout(); btn_start = QtWidgets.QPushButton("Start"); btn_stop = QtWidgets.QPushButton("Stop"); btn_once = QtWidgets.QPushButton("Send Once")
+            hb = QtWidgets.QHBoxLayout(); btn_start = QtWidgets.QPushButton("Start")
+            btn_stop = QtWidgets.QPushButton("Stop"); btn_once = QtWidgets.QPushButton("Send Once")
             hb.addWidget(btn_start); hb.addWidget(btn_stop); hb.addWidget(btn_once); form.addRow(hb)
             meas = QtWidgets.QLabel("TX: - pps"); form.addRow(meas)
-
             sender = UdpSender(sd, self._get_value, self)
             sender.tx_rate.connect(lambda r, _m=meas: _m.setText(f"TX: {r:.0f} pps"))
             btn_start.clicked.connect(sender.start); btn_stop.clicked.connect(sender.stop); btn_once.clicked.connect(sender.send_once)
             self.senders[sd["name"]] = sender; v.addWidget(row)
         self.vside.addWidget(box)
 
-    def _make_plot_toolbar(self, title: str, w: pg.PlotWidget, default_follow: bool) -> QtWidgets.QWidget:
-        bar = QtWidgets.QWidget()
-        h = QtWidgets.QHBoxLayout(bar); h.setContentsMargins(0, 0, 0, 0)
+    def _make_plot_toolbar(self, title: str, w: pg.PlotWidget, default_follow: bool, default_crosshair: bool, default_inspector: bool) -> QtWidgets.QWidget:
+        bar = QtWidgets.QWidget(); h = QtWidgets.QHBoxLayout(bar); h.setContentsMargins(0,0,0,0)
+        btn_pause = QtWidgets.QPushButton("Pause"); btn_pause.setCheckable(True)
+        btn_follow = QtWidgets.QPushButton("Follow"); btn_follow.setCheckable(True); btn_follow.setChecked(default_follow)
+        btn_autoy = QtWidgets.QPushButton("Auto-Y")
+        btn_locky = QtWidgets.QPushButton("Lock-Y"); btn_locky.setCheckable(True)
+        btn_shot = QtWidgets.QPushButton("Screenshot")
+        btn_cross = QtWidgets.QPushButton("Crosshair"); btn_cross.setCheckable(True); btn_cross.setChecked(default_crosshair)
+        btn_hold = QtWidgets.QPushButton("Hold"); btn_hold.setCheckable(True)
+        btn_insp = QtWidgets.QPushButton("Inspector"); btn_insp.setCheckable(True); btn_insp.setChecked(default_inspector)
 
-        btn_pause  = QtWidgets.QPushButton("Pause");   btn_pause.setCheckable(True)
-        btn_follow = QtWidgets.QPushButton("Follow");  btn_follow.setCheckable(True); btn_follow.setChecked(default_follow)
-        btn_autoy  = QtWidgets.QPushButton("Auto-Y")
-        btn_locky  = QtWidgets.QPushButton("Lock-Y");  btn_locky.setCheckable(True)
-        btn_shot   = QtWidgets.QPushButton("Screenshot")
-
-        self.plot_paused[title] = False
-        self.follow_x[title] = default_follow
-        self.y_locked[title] = False
+        self.plot_paused[title] = False; self.follow_x[title] = default_follow; self.y_locked[title] = False
+        self.crosshair_enabled[title] = default_crosshair
+        self.readout_pinned[title] = False
+        self.inspector_visible[title] = default_inspector
+        if default_crosshair: self._enable_crosshair(title, w)
 
         def toggle_pause():
-            val = btn_pause.isChecked()
-            self.plot_paused[title] = val
+            val = btn_pause.isChecked(); self.plot_paused[title] = val
             btn_pause.setText("Resume" if val else "Pause")
-
-        def toggle_follow():
-            self.follow_x[title] = btn_follow.isChecked()
-
+        def toggle_follow(): self.follow_x[title] = btn_follow.isChecked()
         def auto_y():
-            vb = w.getViewBox()
-            vb.enableAutoRange(y=True)
-            w.autoRange()
-            self.y_locked[title] = False
-            self.locked_range.pop(title, None)
-            btn_locky.setChecked(False)
-
+            vb = w.getViewBox(); vb.enableAutoRange(y=True); w.autoRange()
+            self.y_locked[title] = False; self.locked_range.pop(title, None); btn_locky.setChecked(False)
         def toggle_locky():
             if btn_locky.isChecked():
-                vb = w.getViewBox()
-                r = vb.viewRange()[1]
+                vb = w.getViewBox(); r = vb.viewRange()[1]
                 self.locked_range[title] = (float(r[0]), float(r[1]))
-                vb.enableAutoRange(y=False)
-                self.y_locked[title] = True
+                vb.enableAutoRange(y=False); self.y_locked[title] = True
             else:
-                self.y_locked[title] = False
-                w.getViewBox().enableAutoRange(y=True)
-
+                self.y_locked[title] = False; w.getViewBox().enableAutoRange(y=True)
         def screenshot():
             try:
                 from pyqtgraph.exporters import ImageExporter
-                outdir = os.path.join(os.path.dirname(self.cfg.path), "screenshots")
-                os.makedirs(outdir, exist_ok=True)
+                outdir = os.path.join(os.path.dirname(self.cfg.path), "screenshots"); os.makedirs(outdir, exist_ok=True)
                 ts = time.strftime("%Y%m%d-%H%M%S")
-                fname = os.path.join(outdir, f"{title.replace(' ', '_')}-{ts}.png")
-                exporter = ImageExporter(w.plotItem); exporter.export(fname)
+                fname = os.path.join(outdir, f"{title.replace(' ','_')}-{ts}.png")
+                ImageExporter(w.plotItem).export(fname)
                 self.status.showMessage(f"Saved screenshot: {fname}", 2000)
             except Exception as e:
                 self.status.showMessage(f"Screenshot failed: {e}", 3000)
+        def toggle_cross():
+            if btn_cross.isChecked(): self._enable_crosshair(title, w)
+            else: self._disable_crosshair(title)
+        def toggle_hold():
+            self.readout_pinned[title] = btn_hold.isChecked()
+        def toggle_insp():
+            vis = btn_insp.isChecked()
+            self.inspector_visible[title] = vis
+            iw = self.inspector_widgets.get(title)
+            if iw: iw.setVisible(vis)
 
         btn_pause.clicked.connect(toggle_pause)
         btn_follow.clicked.connect(toggle_follow)
         btn_autoy.clicked.connect(auto_y)
         btn_locky.clicked.connect(toggle_locky)
         btn_shot.clicked.connect(screenshot)
+        btn_cross.clicked.connect(toggle_cross)
+        btn_hold.clicked.connect(toggle_hold)
+        btn_insp.clicked.connect(toggle_insp)
 
-        h.addWidget(btn_pause); h.addWidget(btn_follow); h.addWidget(btn_autoy); h.addWidget(btn_locky); h.addWidget(btn_shot); h.addStretch(1)
+        for b in (btn_pause, btn_follow, btn_autoy, btn_locky, btn_shot, btn_cross, btn_hold, btn_insp):
+            h.addWidget(b)
+        h.addStretch(1)
         return bar
 
     def _build_plots_and_docks(self):
+        drop_ts_default = bool(self.cfg.app.get("drop_timestamp_channel", True))
         hide_ts_default = bool(self.cfg.app.get("hide_timestamp_legend", True))
+        crosshair_default = bool(self.cfg.app.get("crosshair", True))
+        inspector_default = bool(self.cfg.app.get("inspector", False))
 
+        # make docks
         for p in self.cfg.plots:
-            title = p["title"]
-            source_name = p.get("source")
+            title = p["title"]; source_name = p.get("source")
             self.plot_source[title] = source_name
-
             x_axis_cfg = p.get("x_axis", {})
-            mode = x_axis_cfg.get("mode", "samples").lower()   # samples | time | timestamp
+            mode = x_axis_cfg.get("mode", "samples").lower()
             fs = float(x_axis_cfg.get("sample_rate_hz", self._infer_fs()))
-            self.plot_x_mode[title] = mode
-            self.plot_fs[title] = fs
-
+            self.plot_x_mode[title] = mode; self.plot_fs[title] = fs
             default_follow = bool(p.get("follow_x", True))
+            default_cross = bool(p.get("crosshair", crosshair_default))
+            default_insp  = bool(p.get("inspector", inspector_default))
 
             w = pg.PlotWidget(title=title)
             g = p.get("grid", [False, False])
-            w.showGrid(x=bool(g[0]) if isinstance(g, list) and len(g) > 0 else False,
-                       y=bool(g[1]) if isinstance(g, list) and len(g) > 1 else False)
-            if p.get("y_range"):
-                lo, hi = p["y_range"]; w.setYRange(lo, hi)
-            w.setLabel("bottom", "Time (s)" if mode in ("time", "timestamp") else "Samples")
+            w.showGrid(x=bool(g[0]) if isinstance(g, list) and len(g)>0 else False,
+                       y=bool(g[1]) if isinstance(g, list) and len(g)>1 else False)
+            if p.get("y_range"): lo, hi = p["y_range"]; w.setYRange(lo, hi)
+            w.setLabel("bottom", "Time (s)" if mode in ("time","timestamp") else "Samples")
 
             self.panels[title] = w
             self.window_samples[title] = int(p.get("window_samples", 2000))
@@ -813,13 +698,38 @@ class Studio(QtWidgets.QMainWindow):
             self.plot_color_cycle[title] = p.get("color_cycle", []) or []
 
             container = QtWidgets.QWidget()
-            vbox = QtWidgets.QVBoxLayout(container); vbox.setContentsMargins(0, 0, 0, 0)
-            vbox.addWidget(self._make_plot_toolbar(title, w, default_follow))
+            vbox = QtWidgets.QVBoxLayout(container); vbox.setContentsMargins(0,0,0,0)
+            vbox.addWidget(self._make_plot_toolbar(title, w, default_follow, default_cross, default_insp))
+
+            # ---- Inspector container (hidden/shown via button) ----
+            insp = QtWidgets.QFrame()
+            iv = QtWidgets.QVBoxLayout(insp); iv.setContentsMargins(0, 0, 0, 0)
+
+            info_bar = QtWidgets.QWidget()
+            info_layout = QtWidgets.QHBoxLayout(info_bar); info_layout.setContentsMargins(6,2,6,2)
+            x_lbl = QtWidgets.QLabel("x = –"); x_lbl.setStyleSheet("font-family: Consolas, monospace;")
+            info_layout.addWidget(x_lbl); info_layout.addStretch(1)
+            iv.addWidget(info_bar)
+
+            table = QtWidgets.QTableWidget(0, 2)
+            table.setHorizontalHeaderLabels(["Channel", "Value"])
+            table.verticalHeader().setVisible(False)
+            table.horizontalHeader().setStretchLastSection(True)
+            table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+            table.setSelectionMode(QtWidgets.QAbstractItemView.NoSelection)
+            table.setFixedHeight(24 * 10)
+            iv.addWidget(table)
+
+            self.readout_tables[title] = table
+            self.readout_x_label[title] = x_lbl
+            self.inspector_widgets[title] = insp
+            insp.setVisible(self.inspector_visible.get(title, default_insp))
+            vbox.addWidget(insp)
+
             vbox.addWidget(w)
+            dock = Dock(title, size=(400,300)); dock.addWidget(container); self.docks[title] = dock
 
-            dock = Dock(title, size=(400, 300)); dock.addWidget(container)
-            self.docks[title] = dock
-
+        # arrange docks
         rows = self.cfg.layout.get("rows", [[pl["title"]] for pl in self.cfg.plots])
         row_anchors = []
         for r, row in enumerate(rows):
@@ -829,97 +739,226 @@ class Studio(QtWidgets.QMainWindow):
                 if r == 0 and c == 0:
                     self.dock_area.addDock(d, "left"); prev = d; row_anchors.append(d)
                 elif c == 0:
-                    anchor = row_anchors[r - 1] if r - 1 < len(row_anchors) else prev
+                    anchor = row_anchors[r-1] if r-1 < len(row_anchors) else prev
                     self.dock_area.addDock(d, "bottom", anchor); prev = d; row_anchors.append(d)
                 else:
                     self.dock_area.addDock(d, "right", prev); prev = d
 
-        # Map timestamp-channel names by source for hiding in legend
+        # timestamp-channel name sets per source
         ts_names_by_src: Dict[str, set] = {}
         for src_name, cfg in self.ds_ts_cfg.items():
             idx = cfg.get("index")
             if idx is None: continue
             ts_names_by_src[src_name] = {ch.name for ch in self.channel_specs.values() if ch.index == idx}
 
-        # Curves per plot
-        # Curves per plot
+        # curves
         for p in self.cfg.plots:
-            title = p["title"]
-            w = self.panels[title]
+            title = p["title"]; w = self.panels[title]
             legend = w.addLegend()
-
-            # expand requested names
             names = expand_list(p.get("channels", []))
             cycle = self.plot_color_cycle.get(title, [])
             src = self.plot_source.get(title)
-
-            # --- NEW: optionally drop the timestamp channel entirely ---
-            drop_ts_default = bool(self.cfg.app.get("drop_timestamp_channel", True))
             drop_ts = bool(p.get("drop_timestamp_channel", drop_ts_default))
-
-            # build a set of channel names that correspond to the timestamp index for this source
-            ts_names_by_src: Dict[str, set] = {}
-            for src_name, cfg in self.ds_ts_cfg.items():
-                idx = cfg.get("index")
-                if idx is None:
-                    continue
-                ts_names_by_src[src_name] = {
-                    ch.name for ch in self.channel_specs.values() if ch.index == idx
-                }
+            hide_ts = bool(p.get("hide_timestamp_legend", hide_ts_default))
             ts_hide_set = ts_names_by_src.get(src, set())
-
             if drop_ts and ts_hide_set:
                 names = [nm for nm in names if nm not in ts_hide_set]
 
-            # optional: still allow legend hiding if some plot leaves timestamp in on purpose
-            hide_ts_default = bool(self.cfg.app.get("hide_timestamp_legend", True))
-            hide_ts = bool(p.get("hide_timestamp_legend", hide_ts_default))
+            # record x-link group requests
+            g = p.get("x_link_group")
+            if g:
+                self.x_link_groups.setdefault(g, []).append(title)
+                if not p.get("x_link_master", False):
+                    self.follow_x[title] = False
 
-            # ensure per-source buffers exist
             if src and src in self.buffers_by_source:
                 bufmap = self.buffers_by_source[src]
                 for nm in names:
                     bufmap.setdefault(nm, deque(maxlen=self.window_samples[title]))
 
             for i, name in enumerate(names):
-                ch_spec = self.channel_specs.get(name)
-                color = (ch_spec.color if ch_spec and ch_spec.color
-                         else (cycle[i % len(cycle)] if cycle else None))
-                pen = pg.mkPen(color=color, width=(ch_spec.width if ch_spec else 1.5)) \
-                      if color else pg.mkPen(width=(ch_spec.width if ch_spec else 1.5))
-
+                ch = self.channel_specs.get(name)
+                color = (ch.color if ch and ch.color else (cycle[i % len(cycle)] if cycle else None))
+                pen = pg.mkPen(color=color, width=(ch.width if ch else 1.5)) if color else pg.mkPen(width=(ch.width if ch else 1.5))
                 legend_name = None if (hide_ts and name in ts_hide_set) else name
                 curve = w.plot([], [], name=legend_name, pen=pen)
                 curve.setClipToView(True)
-                try:
-                    curve.setDownsampling(auto=True, mode="subsample")
-                except Exception:
-                    pass
+                try: curve.setDownsampling(auto=True, mode="subsample")
+                except Exception: pass
                 self.curves[(title, name)] = curve
+                self._readout_add_row(title, name, color)
+
+    def _apply_x_links(self):
+        for group, titles in self.x_link_groups.items():
+            if not titles: continue
+            masters = [p["title"] for p in self.cfg.plots if p.get("x_link_group")==group and p.get("x_link_master")]
+            master = masters[0] if masters else titles[0]
+            for t in titles:
+                if t == master: continue
+                self.panels[t].setXLink(self.panels[master])
+
+    # ----- inspector helpers -----
+    def _readout_add_row(self, title: str, name: str, color):
+        table = self.readout_tables.get(title)
+        if table is None: return
+        if (title, name) in self.readout_rows: return
+        row = table.rowCount()
+        table.insertRow(row)
+        ch_item = QtWidgets.QTableWidgetItem(name)
+        if color is not None:
+            from pyqtgraph import mkColor
+            ch_item.setForeground(mkColor(color))
+        val_item = QtWidgets.QTableWidgetItem("—")
+        val_item.setTextAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
+        table.setItem(row, 0, ch_item)
+        table.setItem(row, 1, val_item)
+        self.readout_rows[(title, name)] = row
+
+    # ----- controls helpers -----
+    def _reset_button(self, cid): self.active[cid] = 0.0
+    def _get_value(self, cid: str): return self.active.get(cid, 0.0)
+
+    # ----- crosshair -----
+    def _enable_crosshair(self, title: str, w: pg.PlotWidget):
+        if title in self.crosshair_items: return
+        v = pg.InfiniteLine(angle=90, movable=False, pen=pg.mkPen((200,200,200,120)))
+        h = pg.InfiniteLine(angle=0,  movable=False, pen=pg.mkPen((200,200,200,120)))
+        w.addItem(v, ignoreBounds=True); w.addItem(h, ignoreBounds=True)
+        proxy = pg.SignalProxy(w.scene().sigMouseMoved, rateLimit=60,
+                               slot=lambda evt, _t=title: self._on_mouse_moved(_t, evt))
+        self.crosshair_items[title] = {"v": v, "h": h, "proxy": proxy}
+        self.crosshair_enabled[title] = True
+
+    def _disable_crosshair(self, title: str):
+        info = self.crosshair_items.pop(title, None)
+        if not info: return
+        w = self.panels.get(title)
+        if w:
+            for k in ("v","h"):
+                try: w.removeItem(info[k])
+                except Exception: pass
+        self.crosshair_enabled[title] = False
+
+    def _on_mouse_moved(self, title: str, evt):
+        if self.readout_pinned.get(title, False):  # freeze
+            return
+        w = self.panels.get(title)
+        if not w: return
+        pos = evt[0] if isinstance(evt, tuple) else evt
+        if not w.sceneBoundingRect().contains(pos): return
+        p = w.plotItem.vb.mapSceneToView(pos)
+
+        ci = self.crosshair_items.get(title)
+        if ci:
+            ci["v"].setPos(p.x()); ci["h"].setPos(p.y())
+
+        xl = self.readout_x_label.get(title)
+        if xl: xl.setText(f"x = {p.x():.6g}")
+
+        table = self.readout_tables.get(title)
+        if not table: return
+        for (t, name), (x, y) in list(self.curve_data.items()):
+            if t != title: continue
+            row = self.readout_rows.get((t, name))
+            if row is None or x is None or y is None or len(x) == 0: continue
+
+            if len(x) >= 2 and np.all(np.diff(x) > 0):
+                xi = float(np.clip(p.x(), x[0], x[-1]))
+                yi = float(np.interp(xi, x, y))
+            else:
+                idx = np.searchsorted(x, p.x())
+                if idx <= 0: j = 0
+                elif idx >= len(x): j = len(x) - 1
+                else: j = idx if abs(x[idx]-p.x()) < abs(x[idx-1]-p.x()) else idx-1
+                yi = float(y[j])
+
+            item = table.item(row, 1)
+            if item: item.setText(f"{yi:.6g}")
+            
+    def _apply_theme_from_cfg(self):
+        theme = self.cfg.app.get("theme", {}) or {}
+        self._apply_theme(theme)
+
+    def _apply_theme(self, theme: dict):
+        app = QtWidgets.QApplication.instance()
+        name = (theme.get("name") or "fusion-light").lower()
+
+        # --- Qt widget style/palette ---
+        if name.startswith("fusion"):
+            app.setStyle("Fusion")
+            pal = QtGui.QPalette()
+            if name == "fusion-dark":
+                # a pleasant dark Fusion palette
+                bg = QtGui.QColor(53, 53, 53)
+                base = QtGui.QColor(42, 42, 42)
+                text = QtGui.QColor(220, 220, 220)
+                pal.setColor(QtGui.QPalette.Window, bg)
+                pal.setColor(QtGui.QPalette.Base, base)
+                pal.setColor(QtGui.QPalette.AlternateBase, bg)
+                pal.setColor(QtGui.QPalette.ToolTipBase, text)
+                pal.setColor(QtGui.QPalette.ToolTipText, text)
+                pal.setColor(QtGui.QPalette.Text, text)
+                pal.setColor(QtGui.QPalette.Button, bg)
+                pal.setColor(QtGui.QPalette.ButtonText, text)
+                pal.setColor(QtGui.QPalette.Highlight, QtGui.QColor(100, 100, 255))
+                pal.setColor(QtGui.QPalette.HighlightedText, QtGui.QColor(0, 0, 0))
+            else:
+                # fusion-light (default)
+                bg = QtGui.QColor("#f2f2f2")
+                base = QtGui.QColor("#ffffff")
+                text = QtGui.QColor("#222222")
+                pal.setColor(QtGui.QPalette.Window, bg)
+                pal.setColor(QtGui.QPalette.Base, base)
+                pal.setColor(QtGui.QPalette.AlternateBase, QtGui.QColor("#e9e9e9"))
+                pal.setColor(QtGui.QPalette.ToolTipBase, base)
+                pal.setColor(QtGui.QPalette.ToolTipText, text)
+                pal.setColor(QtGui.QPalette.Text, text)
+                pal.setColor(QtGui.QPalette.Button, QtGui.QColor("#e6e6e6"))
+                pal.setColor(QtGui.QPalette.ButtonText, text)
+                pal.setColor(QtGui.QPalette.Highlight, QtGui.QColor("#4c7bd9"))
+                pal.setColor(QtGui.QPalette.HighlightedText, QtGui.QColor("#ffffff"))
+            app.setPalette(pal)
+        elif name == "native":
+            # Remove custom palette; keep OS theme
+            app.setStyle(app.style().objectName())
+            app.setPalette(app.style().standardPalette())
+
+        # --- pyqtgraph colors ---
+        pg_bg = theme.get("pg_background", "#111111")
+        pg_fg = theme.get("pg_foreground", "#dddddd")
+        pg.setConfigOption("background", pg_bg)
+        pg.setConfigOption("foreground", pg_fg)
+
+        # Update existing PlotWidgets now (not just future ones)
+        for w in getattr(self, "panels", {}).values():
+            try:
+                w.setBackground(pg_bg)
+                # axes/label colors follow global 'foreground', so this is usually enough
+                w.plotItem.getAxis("left").setTextPen(pg_fg)
+                w.plotItem.getAxis("bottom").setTextPen(pg_fg)
+                w.plotItem.getAxis("left").setPen(pg_fg)
+                w.plotItem.getAxis("bottom").setPen(pg_fg)
+            except Exception:
+                pass
+
+        # --- optional app stylesheet ---
+        qss = theme.get("stylesheet", "")
+        if isinstance(qss, str):
+            app.setStyleSheet(qss)
 
 
-    # ---------- controls helpers ----------
-    def _reset_button(self, cid):
-        self.active[cid] = 0.0
-
-    def _get_value(self, cid: str):
-        return self.active.get(cid, 0.0)
-
-    # ---------- RX/plotting ----------
+    # ----- RX / plotting -----
     def _rx_handler(self, ds_spec: dict):
         pad = ds_spec.get("pad_missing", True)
         trunc = ds_spec.get("drop_excess", True)
         expected = int(ds_spec.get("length", 0))
         ds_name = ds_spec.get("name")
-
         def handler(vec: np.ndarray):
             if expected:
                 if pad and len(vec) < expected:
                     v = np.zeros(expected, dtype=np.float32); v[:len(vec)] = vec; vec = v
                 if trunc and len(vec) > expected:
                     vec = vec[:expected]
-
-            # Timestamp (real or synthetic)
             ts_cfg = self.ds_ts_cfg.get(ds_name, {})
             ts_idx = ts_cfg.get("index", None)
             if ts_idx is not None and 0 <= ts_idx < len(vec):
@@ -927,30 +966,23 @@ class Studio(QtWidgets.QMainWindow):
                 if ts_cfg.get("zero", True):
                     if ts_cfg.get("t0") is None: ts_cfg["t0"] = raw
                     ts = raw - ts_cfg["t0"]
-                else:
-                    ts = raw
+                else: ts = raw
                 self.timebufs[ds_name].append(ts)
             else:
                 fs_src = float(ts_cfg.get("fs", 0.0))
                 if fs_src > 0:
-                    cnt = int(ts_cfg.get("cnt", 0))
-                    ts = cnt / fs_src
-                    if ts_cfg.get("zero", True) and ts_cfg.get("t0") is None:
-                        ts_cfg["t0"] = 0.0
-                    self.timebufs[ds_name].append(ts)
-                    ts_cfg["cnt"] = cnt + 1
+                    cnt = int(ts_cfg.get("cnt", 0)); ts = cnt / fs_src
+                    if ts_cfg.get("zero", True) and ts_cfg.get("t0") is None: ts_cfg["t0"] = 0.0
+                    self.timebufs[ds_name].append(ts); ts_cfg["cnt"] = cnt + 1
 
-            # Channels into per-source buffers
             bufmap = self.buffers_by_source.get(ds_name)
-            if bufmap is None:
-                bufmap = self.buffers_by_source[ds_name] = {}
+            if bufmap is None: bufmap = self.buffers_by_source[ds_name] = {}
             for name, spec in self.channel_specs.items():
                 if spec.index < len(vec):
                     val = float(vec[spec.index]) * spec.scale + spec.offset
                     if name not in bufmap: bufmap[name] = deque(maxlen=5000)
                     bufmap[name].append(val)
 
-            # Derived per-source
             if self.cfg.derived:
                 ns = {k: (float(bufmap[k][-1]) if bufmap.get(k) else 0.0) for k in self.channel_specs.keys()}
                 ns.update({"np": np, "math": math})
@@ -963,107 +995,97 @@ class Studio(QtWidgets.QMainWindow):
                     except Exception:
                         pass
 
-            self._rx_count += 1
-            self.last_len_lbl.setText(f"Vec: {len(vec)}")
+            self._rx_count += 1; self.last_len_lbl.setText(f"Vec: {len(vec)}")
         return handler
 
     def _update_rx_rate(self):
         now = time.time(); dt = now - self._rx_t0
         if dt > 0:
-            rate = self._rx_count / dt
-            self.rx_rate_lbl.setText(f"RX: {rate:.0f} pps")
+            self.rx_rate_lbl.setText(f"RX: {self._rx_count/dt:.0f} pps")
         self._rx_count = 0; self._rx_t0 = now
 
     def _infer_fs(self) -> float:
         for ds in self.cfg.data_sources or []:
-            if "sample_rate_hz" in ds:
-                return float(ds["sample_rate_hz"])
+            if "sample_rate_hz" in ds: return float(ds["sample_rate_hz"])
         return 0.0
 
     def _update_plots(self):
         for (title, name), curve in self.curves.items():
-            if self.plot_paused.get(title, False):
-                continue
-
+            if self.plot_paused.get(title, False): continue
             src = self.plot_source.get(title)
             bufmap = self.buffers_by_source.get(src, {}) if src else {}
             buf = bufmap.get(name)
-            if not buf:
-                continue
+            if not buf: continue
 
             N = int(self.window_samples.get(title, 2000))
             dec = int(max(1, self.decimate.get(title, 1)))
             y_full = np.fromiter(buf, dtype=np.float32)
-            if y_full.size == 0:
-                continue
+            if y_full.size == 0: continue
             y = y_full[-N::dec] if y_full.size > N else y_full[::dec]
-            if y.size == 0:
-                continue
+            if y.size == 0: continue
 
             mode = self.plot_x_mode.get(title, "samples")
             x = None
-
-            # Prefer actual/synthetic time buffer when available
             tbuf = self.timebufs.get(src) if src else None
             if mode in ("timestamp", "time") and tbuf and len(tbuf) > 0:
                 t_full = np.fromiter(tbuf, dtype=np.float32)
                 t = t_full[-N::dec] if t_full.size > N else t_full[::dec]
                 m = min(len(t), len(y))
-                if m == 0:
-                    continue
-                x = t[-m:]; y = y[-m:]
-                curve.setData(x, y)
+                if m == 0: continue
+                x = t[-m:]; y = y[-m:]; curve.setData(x, y)
             elif mode == "time":
                 fs = float(self.plot_fs.get(title, 0.0))
                 if fs > 0:
-                    dt = 1.0 / fs
-                    x = np.arange(len(y), dtype=np.float32) * (dt * dec)
+                    dt = 1.0 / fs; x = np.arange(len(y), dtype=np.float32) * (dt * dec)
                     curve.setData(x, y)
-                else:
-                    curve.setData(y)   # no rolling without X
+                else: curve.setData(y)
             elif mode == "samples":
-                # Use absolute sample index to allow rolling
                 L = len(tbuf) if tbuf is not None else len(y_full)
                 x_full = np.arange(L, dtype=np.float32)
                 x = x_full[-N::dec] if L > N else x_full[::dec]
                 m = min(len(x), len(y))
-                if m == 0:
-                    continue
-                x = x[-m:]; y = y[-m:]
-                curve.setData(x, y)
+                if m == 0: continue
+                x = x[-m:]; y = y[-m:]; curve.setData(x, y)
             else:
                 curve.setData(y)
 
-            # Maintain Y lock
+            # cache for inspector
+            self.curve_data[(title, name)] = (x, y)
+
             if self.y_locked.get(title, False):
                 rng = self.locked_range.get(title)
-                if rng:
-                    self.panels[title].setYRange(rng[0], rng[1])
+                if rng: self.panels[title].setYRange(rng[0], rng[1])
 
-            # Auto-rolling follow
+            # follow/auto-roll
             if self.follow_x.get(title, True) and x is not None and x.size > 0:
                 xcfg = next((pl.get("x_axis", {}) for pl in self.cfg.plots if pl.get("title") == title), {})
                 if mode in ("timestamp", "time"):
+                    lock_right = bool(xcfg.get("lock_right", True))
                     win_s = xcfg.get("window_s", None)
                     if win_s is None:
-                        if x.size > 1:
-                            win_s = float(x[-1] - x[0])
-                            if win_s <= 0:
-                                fs = float(self.plot_fs.get(title, 0.0))
-                                win_s = float(min(N, len(tbuf) if tbuf is not None else N) / fs) if fs > 0 else 5.0
+                        if tbuf is not None and len(tbuf) >= 3:
+                            t_tail = np.fromiter(tbuf, dtype=np.float32)[-min(len(tbuf), 2000):]
+                            dts = np.diff(t_tail); dts = dts[np.isfinite(dts) & (dts > 0)]
+                            if dts.size:
+                                dt_est = float(np.median(dts))
+                                Nvis = min(N, len(t_tail)); win_s = max(3*dt_est, dt_est*(Nvis/max(1, dec)))
+                            else:
+                                win_s = max(1.0, float(x[-1]-x[0]))
                         else:
                             fs = float(self.plot_fs.get(title, 0.0))
-                            win_s = float(N / fs) if fs > 0 else 5.0
-                    x_end = float(x[-1]); x_start = x_end - float(win_s)
+                            win_s = (N/fs) if fs>0 else max(1.0, float(x[-1]-x[0]))
+                    if lock_right:
+                        x_end = float(x[-1]); x_start = x_end - float(win_s)
+                    else:
+                        mid = float(x[-1]); half = float(win_s)/2.0; x_start, x_end = mid-half, mid+half
                     self.panels[title].setXRange(x_start, x_end, padding=0)
                 elif mode == "samples":
-                    x_end = float(x[-1]); x_start = x_end - float(max(1, min(N, int(x_end + 1))))
+                    x_end = float(x[-1]); x_start = x_end - float(max(1, min(N, int(x_end+1))))
                     self.panels[title].setXRange(x_start, x_end, padding=0)
 
 def main():
     app = QtWidgets.QApplication(sys.argv)
-    w = Studio("config.yaml")
-    w.show()
+    w = Studio("config.yaml"); w.show()
     sys.exit(app.exec_())
 
 if __name__ == "__main__":

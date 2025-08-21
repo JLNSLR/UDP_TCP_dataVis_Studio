@@ -1,0 +1,28 @@
+app:
+  title: "TCP Test (Client)"
+  fps: 60
+
+data_sources:
+  - name: tcp0
+    type: tcp_client
+    host: "127.0.0.1"
+    port: 7000
+    format: float32_le_fixed # fixed-length float32 frames
+    length: 22 # must match server
+    sample_rate_hz: 200 # used for time axis mapping
+
+channels:
+  - range: "ch0..ch21" # names ch0..ch21 mapped to indices 0..21
+
+plots:
+  - title: "TCP Demo"
+    source: tcp0
+    channels: ["ch0..ch5"]
+    window_samples: 5000
+    decimate: 1
+    grid: [true, true]
+    x_axis: { mode: time, sample_rate_hz: 200 } # seconds on X
+
+layout:
+  rows:
+    - ["TCP Demo"]

@@ -1,0 +1,27 @@
+app:
+  title: "UDP/TCP Studio (Timestamp mode)"
+  fps: 60
+
+data_sources:
+  - name: tcp0
+    type: tcp_client
+    host: "127.0.0.1"
+    port: 7000
+    format: float32_le_fixed
+    length: 22
+
+    # Timestamp comes from element 21 (last), already in seconds:
+    timestamp_index: 21
+    timestamp_units: s
+    timestamp_zero: true # subtract first timestamp so plots start near 0 s
+
+channels:
+  - range: "ch0..ch21" # ch21 is the timestamp element; don't include it in plot channels if you don't want it drawn
+
+plots:
+  - title: "TCP + Timestamp"
+    source: tcp0
+    channels: ["ch0..ch5"] # plot any data channels; avoid ch21 if you don't want the timestamp curve
+    window_samples: 5000
+    grid: [true, true]
+    x_axis: { mode: timestamp } # use per-frame timestamp for X

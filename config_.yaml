@@ -1,0 +1,102 @@
+# config.yaml
+app:
+  title: "UDP Plotter"
+  fps: 60 # UI refresh
+
+data_sources:
+  - name: udp0
+    type: udp
+    bind_ip: "0.0.0.0"
+    port: 5005
+    format: float32_le # or ascii
+    length: 22 # expected vector length
+    drop_excess: true # if packet longer than length, truncate
+    pad_missing: true # if shorter, pad with zeros
+
+channels:
+  # index maps to incoming vector index
+  - { name: ch0, index: 0, unit: "N", scale: 1.0, offset: 0.0, color: auto }
+  - { name: ch1, index: 1, unit: "N", scale: 1.0, offset: 0.0 }
+  - { name: ch2, index: 2, unit: "N", scale: 0.1, offset: 0.0 }
+  # ...
+  - { name: ch21, index: 21, unit: "", scale: 1.0, offset: 0.0 }
+
+derived:
+  # optional: compute channels from expressions referencing others by name or idx
+  - { name: diff01, expr: "ch1 - ch0", unit: "N" }
+  - { name: norm012, expr: "sqrt(ch0**2 + ch1**2 + ch2**2)", unit: "" }
+
+plots:
+  # You can create many plots and place selected channels into each.
+  - title: "Forces"
+    source: udp0
+    channels: ["ch0", "ch1", "ch2", "diff01"]
+    window_samples: 5000
+    decimate: 2 # draw every 2nd sample for speed
+    y_range: null # or [ -10, 10 ]
+    grid: [true, true] # x,y grid
+
+  - title: "IMU"
+    source: udp0
+    channels: ["ch3", "ch4", "ch5"]
+    window_samples: 3000
+    decimate: 1
+
+  - title: "Misc"
+    source: udp0
+    channels: ["ch6..ch12"] # ranges expand to ch6, ch7, ..., ch12
+
+layout:
+  # grid layout of plots (by title)
+  rows:
+    - ["Forces"]
+    - ["IMU", "Misc"]
+
+senders:
+  - name: tx0
+    type: udp
+    remote_ip: "192.168.0.50"
+    remote_port: 5006
+    rate_hz: 500.0
+    format: float32_le # or ascii
+    vector:
+      # build vector from constants and GUI-bound controls (see controls)
+      template: ["$k_p", "$k_d", 0.0, "$enable", "$bias"]
+      on_demand_button: "Send Once" # optional extra button name
+
+controls:
+  # Controls that appear in a side panel and can bind to senders or scales
+  - {
+      id: k_p,
+      type: float,
+      label: "Kp",
+      min: 0,
+      max: 200,
+      step: 0.1,
+      default: 10.0,
+    }
+  - {
+      id: k_d,
+      type: float,
+      label: "Kd",
+      min: 0,
+      max: 50,
+      step: 0.1,
+      default: 1.5,
+    }
+  - {
+      id: bias,
+      type: float,
+      label: "Bias",
+      min: -5,
+      max: 5,
+      step: 0.01,
+      default: 0.0,
+    }
+  - { id: enable, type: bool, label: "Enable", default: true }
+
+logging:
+  enabled: false
+  path: "./logs"
+  format: npz # or csv
+  rotate_mb: 512

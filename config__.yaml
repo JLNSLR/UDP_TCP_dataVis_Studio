@@ -1,0 +1,153 @@
+app:
+  title: "UDP Studio (Dockable)"
+  fps: 60
+
+data_sources:
+  - name: udp0
+    type: udp
+    bind_ip: "0.0.0.0"
+    port: 5005
+    format: float32_le
+    length: 22
+    pad_missing: true
+    drop_excess: true
+    sample_rate_hz: 500 # optional default for plots (can be overridden per-plot)
+
+channels:
+  # Give some channels fixed colors and line widths
+  - range: "ch0..ch21"
+    scale: 1.0
+    offset: 0.0
+    # you can assign a single color/width for the whole range, or define individual entries above
+    color: null
+    width: 1.5
+
+derived:
+  - { name: norm012, expr: "np.sqrt(ch0**2 + ch1**2 + ch2**2)" }
+
+plots:
+  - title: "Forces"
+    source: udp0
+    channels: ["ch0..ch2", "norm012"]
+    window_samples: 5000
+    decimate: 1
+    grid: [true, true]
+    color_cycle: ["#e63946", "#457b9d", "#2a9d8f", "#f4a261"]
+    x_axis: { mode: time, sample_rate_hz: 500 } # time axis in seconds
+
+  - title: "IMU"
+    source: udp0
+    channels: ["ch3..ch8"]
+    window_samples: 300
+    decimate: 1
+    grid: [true, true]
+    color_cycle: ["#8e44ad", "#2980b9", "#16a085"]
+    x_axis: { mode: time, sample_rate_hz: 200 } # override to 200 Hz for this panel
+
+  - title: "Misc"
+    source: udp0
+    channels: ["ch9..ch21"]
+    window_samples: 300
+    decimate: 2
+    grid: [true, true]
+    color_cycle: ["#ff6b6b", "#4dabf7", "#51cf66", "#ffa94d"]
+    x_axis: { mode: samples } # keep sample index
+
+layout:
+  rows:
+    - ["Forces"]
+    - ["IMU", "Misc"]
+
+control_groups:
+  - { name: gains, title: "Controller Gains", apply_label: "Apply Gains" }
+  - { name: modes, title: "Modes", apply_label: "Apply Modes" }
+  - { name: actions, title: "Actions" }
+
+controls:
+  - {
+      id: k_p,
+      type: float,
+      group: gains,
+      label: "Kp",
+      min: 0,
+      max: 200,
+      step: 0.1,
+      default: 10.0,
+      apply_required: true,
+    }
+  - {
+      id: k_d,
+      type: float,
+      group: gains,
+      label: "Kd",
+      min: 0,
+      max: 50,
+      step: 0.1,
+      default: 1.5,
+      apply_required: true,
+    }
+  - {
+      id: bias,
+      type: float,
+      group: gains,
+      label: "Bias",
+      min: -5,
+      max: 5,
+      step: 0.01,
+      default: 0.0,
+      apply_required: true,
+    }
+
+  - {
+      id: enable,
+      type: bool,
+      group: modes,
+      label: "Enable",
+      default: true,
+      apply_required: true,
+    }
+  - {
+      id: logging_on,
+      type: bool,
+      group: modes,
+      label: "Logging ON",
+      default: false,
+      apply_required: false,
+    }
+
+  - {
+      id: zero_cmd,
+      type: button,
+      group: actions,
+      label: "Zero Offsets",
+      pulse_ms: 50,
+    }
+  - {
+      id: start_tr,
+      type: button,
+      group: actions,
+      label: "Start Trial",
+      pulse_ms: 50,
+    }
+
+senders:
+  - name: tx0
+    type: udp
+    remote_ip: "127.0.0.1"
+    remote_port: 5006
+    rate_hz: 500.0
+    format: float32_le
+    vector:
+      template:
+        [
+          "$k_p",
+          "$k_d",
+          "$bias",
+          "$enable",
+          "$logging_on",
+          "$zero_cmd",
+          "$start_tr",
+          0.0,
+          0.0,
+          123.0,
+        ]

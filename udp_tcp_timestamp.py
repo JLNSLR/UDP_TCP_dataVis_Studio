@@ -15,6 +15,7 @@ from PyQt5.QtNetwork import QUdpSocket, QHostAddress
 import pyqtgraph as pg
 from pyqtgraph.dockarea import DockArea, Dock
 
+pg.setConfigOptions(useOpenGL=True, antialias=True)  
 
 # ------------------ Tiny helpers (NO regex) ------------------
 

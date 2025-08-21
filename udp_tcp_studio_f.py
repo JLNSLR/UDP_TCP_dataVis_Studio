@@ -15,6 +15,8 @@ from PyQt5.QtNetwork import QUdpSocket, QHostAddress
 import pyqtgraph as pg
 from pyqtgraph.dockarea import DockArea, Dock
 
+pg.setConfigOptions(useOpenGL=True, antialias=True)  # anti-aliasing hurts perf
+
 
 # ------------------ Tiny helpers (NO regex) ------------------
 
@@ -840,14 +842,38 @@ class Studio(QtWidgets.QMainWindow):
             ts_names_by_src[src_name] = {ch.name for ch in self.channel_specs.values() if ch.index == idx}
 
         # Curves per plot
+        # Curves per plot
         for p in self.cfg.plots:
-            title = p["title"]; w = self.panels[title]
+            title = p["title"]
+            w = self.panels[title]
             legend = w.addLegend()
+
+            # expand requested names
             names = expand_list(p.get("channels", []))
             cycle = self.plot_color_cycle.get(title, [])
             src = self.plot_source.get(title)
+
+            # --- NEW: optionally drop the timestamp channel entirely ---
+            drop_ts_default = bool(self.cfg.app.get("drop_timestamp_channel", True))
+            drop_ts = bool(p.get("drop_timestamp_channel", drop_ts_default))
+
+            # build a set of channel names that correspond to the timestamp index for this source
+            ts_names_by_src: Dict[str, set] = {}
+            for src_name, cfg in self.ds_ts_cfg.items():
+                idx = cfg.get("index")
+                if idx is None:
+                    continue
+                ts_names_by_src[src_name] = {
+                    ch.name for ch in self.channel_specs.values() if ch.index == idx
+                }
+            ts_hide_set = ts_names_by_src.get(src, set())
+
+            if drop_ts and ts_hide_set:
+                names = [nm for nm in names if nm not in ts_hide_set]
+
+            # optional: still allow legend hiding if some plot leaves timestamp in on purpose
+            hide_ts_default = bool(self.cfg.app.get("hide_timestamp_legend", True))
             hide_ts = bool(p.get("hide_timestamp_legend", hide_ts_default))
-            hide_set = ts_names_by_src.get(src, set())
 
             # ensure per-source buffers exist
             if src and src in self.buffers_by_source:
@@ -857,14 +883,20 @@ class Studio(QtWidgets.QMainWindow):
 
             for i, name in enumerate(names):
                 ch_spec = self.channel_specs.get(name)
-                color = (ch_spec.color if ch_spec and ch_spec.color else (cycle[i % len(cycle)] if cycle else None))
-                pen = pg.mkPen(color=color, width=(ch_spec.width if ch_spec else 1.5)) if color else pg.mkPen(width=(ch_spec.width if ch_spec else 1.5))
-                legend_name = None if (hide_ts and name in hide_set) else name
+                color = (ch_spec.color if ch_spec and ch_spec.color
+                         else (cycle[i % len(cycle)] if cycle else None))
+                pen = pg.mkPen(color=color, width=(ch_spec.width if ch_spec else 1.5)) \
+                      if color else pg.mkPen(width=(ch_spec.width if ch_spec else 1.5))
+
+                legend_name = None if (hide_ts and name in ts_hide_set) else name
                 curve = w.plot([], [], name=legend_name, pen=pen)
                 curve.setClipToView(True)
-                try: curve.setDownsampling(auto=True, mode="subsample")
-                except Exception: pass
+                try:
+                    curve.setDownsampling(auto=True, mode="subsample")
+                except Exception:
+                    pass
                 self.curves[(title, name)] = curve
+
 
     # ---------- controls helpers ----------
     def _reset_button(self, cid):
